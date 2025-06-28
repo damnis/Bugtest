@@ -1,7 +1,7 @@
-    import streamlit as st
-    import yfinance as yf
-    import pandas as pd
-    from ta.trend import ADXIndicator
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+from ta.trend import ADXIndicator
 
     # Data ophalen
     df = yf.download("ASML.AS", period="1mo", interval="1d")
