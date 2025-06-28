@@ -11,8 +11,13 @@ df = df[(df["Volume"] > 0) & ((df["Open"] != df["Close"]) | (df["High"] != df["L
 if df.empty:
     st.error("Geen geldige data gevonden voor ASML.AS.")
 else:
-    # Gebruik direct de kolommen
-    adx = ADXIndicator(high=df["High"], low=df["Low"], close=df["Close"], window=14)
+    # ✅ Fix: Zorg dat de inputs eendimensionale Series zijn
+    high_series = df["High"].squeeze()
+    low_series = df["Low"].squeeze()
+    close_series = df["Close"].squeeze()
+
+    # ✅ SAMD op basis van DI+ en DI-
+    adx = ADXIndicator(high=high_series, low=low_series, close=close_series, window=14)
 
     df["DI_PLUS"] = adx.adx_pos()
     df["DI_MINUS"] = adx.adx_neg()
@@ -25,7 +30,6 @@ else:
 
     st.subheader("📈 Laatste 10 rijen met SAMD-berekening")
     st.write(df[["Close", "DI_PLUS", "DI_MINUS", "SAMD"]].tail(10).round(2))
-
 
 
 
