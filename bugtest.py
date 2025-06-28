@@ -5,7 +5,7 @@ from ta.trend import ADXIndicator
 
 # 📥 Data ophalen
 st.write("Haal data op van Yahoo Finance...")
-df = yf.download("SMCI", period="12mo", interval="1d")
+df = yf.download("ASML.AS", period="12mo", interval="1d")
 df = df[(df["Volume"] > 0) & ((df["Open"] != df["Close"]) | (df["High"] != df["Low"]))]
 
 if df.empty:
