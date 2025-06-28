@@ -9,7 +9,7 @@ epsilonpos = 30.0
 window = 14
 
 # Tickers om te testen
-tickers = ["ASML.AS", "SMCI", "MSFT"]
+tickers = ["ASML.AS", "SMCI", "MSFT", "NVDA"]
 
 st.title("🔎 SAMD Debug View voor Meerdere Tickers")
 
@@ -18,7 +18,7 @@ def bereken_samd(ticker):
     st.markdown(f"### 📊 {ticker}")
 
     # 📥 Data ophalen
-    df = yf.download(ticker, period="120mo", interval="1d").dropna()
+    df = yf.download(ticker, period="120y", interval="1d").dropna()
     df = df[(df["Volume"] > 0) & ((df["Open"] != df["Close"]) | (df["High"] != df["Low"]))]
 
     # Herstel ontbrekende waarden
@@ -48,7 +48,7 @@ def bereken_samd(ticker):
     df.loc[(df["DI_MINUS"] > df["DI_PLUS"]) & (df["DI_PLUS"] > epsilonneg), "SAMD"] = -0.5
 
     # 🔍 Toon tabel
-    st.dataframe(df[["Close", "High", "Low", "DI_PLUS", "DI_MINUS", "SAMD"]].tail(40).round(2))
+    st.dataframe(df[["Close", "High", "Low", "DI_PLUS", "DI_MINUS", "SAMD"]].tail(120).round(2))
 
 # ➕ Run voor elke ticker
 for ticker in tickers:
