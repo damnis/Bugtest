@@ -21,15 +21,42 @@ else:
 
     df["DI_PLUS"] = adx.adx_pos()
     df["DI_MINUS"] = adx.adx_neg()
-    df["SAMD"] = 0.0
+#    df["SAMD"] = 0.0
 
-    df.loc[(df["DI_PLUS"] > 0) & (df["DI_MINUS"] == 0), "SAMD"] = 1.0
-    df.loc[(df["DI_MINUS"] > 0) & (df["DI_PLUS"] == 0), "SAMD"] = -1.0
-    df.loc[(df["DI_PLUS"] > df["DI_MINUS"]) & (df["DI_MINUS"] > 0), "SAMD"] = 0.5
-    df.loc[(df["DI_MINUS"] > df["DI_PLUS"]) & (df["DI_PLUS"] > 0), "SAMD"] = -0.5
+   # df.loc[(df["DI_PLUS"] > 0) & (df["DI_MINUS"] == 0), "SAMD"] = 1.0
+   # df.loc[(df["DI_MINUS"] > 0) & (df["DI_PLUS"] == 0), "SAMD"] = -1.0
+  #  df.loc[(df["DI_PLUS"] > df["DI_MINUS"]) & (df["DI_MINUS"] > 0), "SAMD"] = 0.5
+ #   df.loc[(df["DI_MINUS"] > df["DI_PLUS"]) & (df["DI_PLUS"] > 0), "SAMD"] = -0.5
+
+    
+    # Epsilon-drempels instellen
+    epsilonneg = 10.0  # vrijwel afwezig andere richting
+    epsilonpos = 30.0  # sterke richting
+    df["SAMD"] = 0.0
+    # 1️⃣ Sterke positieve richting
+    df.loc[(df["DI_PLUS"] > epsilonpos) & (df["DI_MINUS"] <= epsilonneg), "SAMD"] = 1.0
+
+    # 2️⃣ Sterke negatieve richting
+    df.loc[(df["DI_MINUS"] > epsilonpos) & (df["DI_PLUS"] <= epsilonneg), "SAMD"] = -1.0
+
+    # 3️⃣ Lichte positieve richting
+    df.loc[(df["DI_PLUS"] > df["DI_MINUS"]) & (df["DI_MINUS"] > epsilonneg), "SAMD"] = 0.5
+
+    # 4️⃣ Lichte negatieve richting
+    df.loc[(df["DI_MINUS"] > df["DI_PLUS"]) & (df["DI_PLUS"] > epsilonneg), "SAMD"] = -0.5
+
+
 
     st.subheader("📈 Laatste xx rijen met SAMD-berekening")
     st.write(df[["Close", "High", "Low", "DI_PLUS", "DI_MINUS", "SAMD"]].tail(240).round(2))
+
+
+
+
+
+
+
+
 
 
 
