@@ -29,7 +29,7 @@ else:
     df.loc[(df["DI_MINUS"] > df["DI_PLUS"]) & (df["DI_PLUS"] > 0), "SAMD"] = -0.5
 
     st.subheader("📈 Laatste xx rijen met SAMD-berekening")
-    st.write(df[["Close", "High", "Low", "DI_PLUS", "DI_MINUS", "SAMD"]].tail(30).round(2))
+    st.write(df[["Close", "High", "Low", "DI_PLUS", "DI_MINUS", "SAMD"]].tail(120).round(2))
 
 
 
