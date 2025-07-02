@@ -7,8 +7,6 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta, date
 import matplotlib.pyplot as plt
 from ta.trend import ADXIndicator
-#from datetime import date
-#from datetime import timedelta
 #from ta.momentum import TRIXIndicator
 
 # --- Functie om data op te halen ---
@@ -73,9 +71,9 @@ def bepaal_grafiekperiode(interval):
     elif interval == "4h":
         return timedelta(days=90)       # 3 maanden à ~6 candles per week
     elif interval == "1d":
-        return timedelta(days=180)      # 180=6 maanden à 1 candle per dag
+        return timedelta(days=360)      # 180=6 maanden à 1 candle per dag
     elif interval == "1wk":
-        return timedelta(weeks=104)     # 104=2 jaar aan weekly candles (104 candles)
+        return timedelta(weeks=200)     # 104=2 jaar aan weekly candles (104 candles)
     elif interval == "1mo":
         return timedelta(weeks=520)     # 520=0 jaar aan monthly candles (120 candles)
     else:
@@ -95,6 +93,7 @@ def bepaal_grafiekperiode(interval):
 
 
 # --- SAM Indicatorberekeningen ---
+@st.cache_data(ttl=900)
 def calculate_sam(df):
     df = df.copy()
 
@@ -244,18 +243,44 @@ def calculate_sam(df):
         (df["WMA6"] <= df["WMA6_shifted"]) & (df["WMA6"] > df["WMA80"]),
         "SAMT"
     ] = -0.5
-    
-    # SAMD
-    # --- SAMD op basis van DI+ en DI- ---
-    high_series = df["High"].squeeze()
-    low_series = df["Low"].squeeze()
-    close_series = df["Close"].squeeze()
 
-    adx = ADXIndicator(high=high_series, low=low_series, close=close_series, window=14)
+    # --- SAMD op basis van DI+ en DI- ---
+    # ————————— Flatten MultiIndex kolommen ——————————
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    # 1) Haal de Series direct op (geen squeeze)
+    high_series  = df["High"]
+    low_series   = df["Low"]
+    close_series = df["Close"]
+    
+    # 2) Optioneel: forceer numeric en drop NaNs vóór de indicator
+    high_series  = pd.to_numeric(high_series, errors="coerce")
+    low_series   = pd.to_numeric(low_series, errors="coerce")
+    close_series = pd.to_numeric(close_series, errors="coerce")
+    
+    # 4) Roep ADXIndicator aan
+    adx = ADXIndicator(
+        high=high_series,
+        low=low_series,
+        close=close_series,
+        window=14,
+        fillna=True
+    )
+    
+#    df["DI_PLUS"]  = adx.adx_pos()
+#    df["DI_MINUS"] = adx.adx_neg()
+
+    # SAMD - was goed
+    # --- SAMD op basis van DI+ en DI- ---
+#    high_series = df["High"].squeeze()
+#    low_series = df["Low"].squeeze()
+#    close_series = df["Close"].squeeze()
+
+#    adx = ADXIndicator(high=high_series, low=low_series, close=close_series, window=14)
 
     df["DI_PLUS"] = adx.adx_pos()
     df["DI_MINUS"] = adx.adx_neg()
-  #  df["SAMD"] = 0.0  # begin met 0.0
+    df["SAMD"] = 0.0  # begin met 0.0
 
     # Epsilon-drempels instellen
     epsilonneg = 10.0  # vrijwel afwezig andere richting
@@ -332,23 +357,6 @@ def calculate_sam(df):
     # Zwakke neerwaartse trend
     df.loc[(df["TRIX"] < 0) & (df["TRIX"] >= df["TRIX_PREV"]), "SAMX"] = -0.5
 
-    # --- SAMX op basis van TRIX - werkt niet met ta
-#    close_series = df["Close"].squeeze()
- #   trix_ind = TRIXIndicator(close=close_series, window=15)
-
-  #  df["TRIX"] = trix_ind.trix()
-#    df["TRIX_PREV"] = df["TRIX"].shift(1)
-#    df["SAMX"] = 0.0  # Standaardwaarde
-
-    # Sterke opwaartse trend
-#    df.loc[(df["TRIX"] > 0) & (df["TRIX"] > df["TRIX_PREV"]), "SAMX"] = 0.75
-    # Zwakke opwaartse trend
-#    df.loc[(df["TRIX"] > 0) & (df["TRIX"] <= df["TRIX_PREV"]), "SAMX"] = 0.5
-    # Sterke neerwaartse trend
-#    df.loc[(df["TRIX"] < 0) & (df["TRIX"] < df["TRIX_PREV"]), "SAMX"] = -0.75
-    # Zwakke neerwaartse trend
-#    df.loc[(df["TRIX"] < 0) & (df["TRIX"] >= df["TRIX_PREV"]), "SAMX"] = -0.5
-
     # SAMX OUD
 #    df["Momentum"] = df["Close"] - df["Close"].shift(3)
 #    df["SAMX"] = 0
@@ -361,13 +369,104 @@ def calculate_sam(df):
     return df
     
 
-# --- Advies en rendementen ---
-def determine_advice(df, threshold):
+ #--- Advies en rendementen ---
+# ✅ Helperfunctie voor veilige conversie naar float
+def safe_float(val):
+    try:
+        return float(val) if pd.notna(val) else 0.0
+    except:
+        return 0.0
+
+# ✅ Verbeterde SAT-berekening met debug en fallback
+@st.cache_data(ttl=900)
+def calculate_sat(df):
+    # ✅ Controle op MultiIndex en 'Close'-fallback
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    if "Close" not in df.columns:
+        mogelijke_close = [col for col in df.columns if col.lower() == "close" or "close" in col.lower()]
+        if mogelijke_close:
+            df["Close"] = df[mogelijke_close[0]]
+        else:
+            st.error("❌ Kon geen geldige 'Close'-kolom vinden voor SAT-berekening.")
+            return df
+
+    # ✅ Berekeningen
+    df["MA150"] = df["Close"].rolling(window=150).mean()
+    df["MA30"] = df["Close"].rolling(window=30).mean()
+    df["SAT_Stage"] = np.nan  # eerst lege kolom
+
+    for i in range(1, len(df)):
+        ma150 = safe_float(df["MA150"].iloc[i])
+        ma150_prev = safe_float(df["MA150"].iloc[i - 1])
+        ma30 = safe_float(df["MA30"].iloc[i])
+        ma30_prev = safe_float(df["MA30"].iloc[i - 1])
+        close = safe_float(df["Close"].iloc[i])
+        stage_prev = safe_float(df["SAT_Stage"].iloc[i - 1]) if i > 1 else 0.0
+        stage = stage_prev  # start met vorige stage-waarde
+
+#        if i > len(df) - 10:
+#            st.write(f"🔍 i={i} | Close={close:.2f}, MA150={ma150:.2f}, MA150_prev={ma150_prev:.2f}, MA30={ma30:.2f}, MA30_prev={ma30_prev:.2f}")
+
+        if ((ma150 > ma150_prev and close > ma150 and ma30 > close) or
+              (close > ma150 and ma30 < ma30_prev and ma30 > close)):
+            stage = -1
+ #           if i > len(df) - 10:
+ #               st.write(f"🔥 i={i}: Oververhitting of correctie → stage = -1")
+        
+        elif (ma150 < ma150_prev and close < ma150 and close > ma30 and ma30 > ma30_prev):
+            stage = 1
+ #           if i > len(df) - 10:
+ #               st.write(f"🌀 i={i}: Koers tussen MA150 en MA30, MA150 daalt → stage = 1")
+        
+        elif (ma150 > close and ma150 > ma150_prev):
+            stage = -1
+#            if i > len(df) - 10:
+#                st.write(f"😐 i={i}: MA150 stijgt, ligt boven koers → stage = -1")
+
+        elif (ma150 < close and ma150 < ma150_prev and ma30 > ma30_prev):
+            stage = 1
+  #          if i > len(df) - 10:
+ #               st.write(f"🌱 i={i}: MA150 en MA30 stijgen onder koers → stage = 1")
+
+        elif (ma150 > close and ma150 < ma150_prev):
+            stage = -2
+  #          if i > len(df) - 10:
+#                st.write(f"📉 i={i}: MA150 > Close en MA150 daalt → stage = -2")
+        
+        elif (ma150 < close and ma150 > ma150_prev and ma30 > ma30_prev):
+            stage = 2
+#            if i > len(df) - 10:
+#                st.write(f"📈 i={i}: MA150 stijgt richting koers, MA30 stijgt → stage = 2")
+
+        else:
+            stage = stage_prev
+#            if i > len(df) - 10:
+#                st.write(f"⚪️ i={i}: Geen duidelijke verandering → stage = stage_prev ({stage_prev})")
+
+        df.at[df.index[i], "SAT_Stage"] = stage
+
+    df["SAT_Stage"] = df["SAT_Stage"].astype(float)
+    df["SAT_Trend"] = df["SAT_Stage"].rolling(window=25).mean()
+    return df
+    
+    # 📊 Debug: Laatste waarden MA150 en MA30
+ #   st.write("Laatste 5 waarden van MA150:", df["MA150"].tail())
+ # ×  st.write("Laatste 5 waarden van MA30:", df["MA30"].tail())
+# ÷   st.write("📈 Laatste Close-waarden:", df["Close"].tail(10))
+  #  return df
+    
+#st.write("MA150 laatste waarden:", df["MA150"].tail())
+#st.write("MA30 laatste waarden:", df["MA30"].tail())
+#st.write("SAT_Stage laatste waarden:", df["SAT_Stage"].tail())    
+
+
+def determine_advice(df, threshold, risk_aversion=False):
     df = df.copy()
 
     # 🧮 Trendberekening over SAM
-    df["Trend"] = weighted_moving_average(df["SAM"], 12)  # wma zoals hoort
- #   df["Trend"] = df["SAM"].rolling(window=12).mean()  # hier Trend sam ingeven default:12
+    df["Trend"] = weighted_moving_average(df["SAM"], 12)
     df["TrendChange"] = df["Trend"] - df["Trend"].shift(1)
     df["Richting"] = np.sign(df["TrendChange"])
     df["Trail"] = 0
@@ -388,22 +487,41 @@ def determine_advice(df, threshold):
 
         df.at[df.index[i], "Trail"] = huidige_trend
 
-    # ✅ Eerst advies op basis van sterke trendwaarde
-#    df.loc[df["Trend"] > 2, "Advies"] = "Kopen"
- #   df.loc[df["Trend"] < -2, "Advies"] = "Verkopen"
+    # ✅ Advieslogica
+    if risk_aversion:
+        df = calculate_sat(df)
+        df["Advies"] = df["Advies"].astype(object)
 
- #   df.loc[df["SAM"] > 2, "Advies"] = "Kopen"
- #   df.loc[df["SAM"] < -2, "Advies"] = "Verkopen"
+        for i in range(2, len(df)):
+            trend_sam = df["Trend"].iloc[i]
+            trend_nu = df["SAT_Trend"].iloc[i]
+            trend_vorige = df["SAT_Trend"].iloc[i - 1]
+            trend_eerder = df["SAT_Trend"].iloc[i - 2]
+      #      sam_3 = df["SAM"].iloc[i - 2:i + 1]
+            sam_3 = df["SAM"].iloc[i - 2 : i + 1]
+            
+            # 🔹 Positieve trend
+            if trend_nu >= 0.0 or (sam_3 > 0).all():
+                if all(sam_3 < 0) or trend_sam < 0:
+                    df.at[df.index[i], "Advies"] = "Verkopen"
+                else:
+                    df.at[df.index[i], "Advies"] = "Kopen"
 
-    # ✅ Daarna alleen nog trailing advies als er nog geen advies is
-    mask_koop = (df["Richting"] == 1) & (df["Trail"] >= threshold) & (df["Advies"].isna())
-    mask_verkoop = (df["Richting"] == -1) & (df["Trail"] >= threshold) & (df["Advies"].isna())
+            # 🔹 Negatieve trend
+            elif trend_nu < 0.0 or (sam_3 > 0).all():
+                if all(sam_3 > 0) or trend_sam > 0:
+                    df.at[df.index[i], "Advies"] = "Kopen"
+                else:
+                    df.at[df.index[i], "Advies"] = "Verkopen"
 
-    df.loc[mask_koop, "Advies"] = "Kopen"
-    df.loc[mask_verkoop, "Advies"] = "Verkopen"
+        df["Advies"] = df["Advies"].ffill()
+    else:
+        mask_koop = (df["Richting"] == 1) & (df["Trail"] >= threshold) & (df["Advies"].isna())
+        mask_verkoop = (df["Richting"] == -1) & (df["Trail"] >= threshold) & (df["Advies"].isna())
 
-    # 🔄 Advies forward fillen
-    df["Advies"] = df["Advies"].ffill()
+        df.loc[mask_koop, "Advies"] = "Kopen"
+        df.loc[mask_verkoop, "Advies"] = "Verkopen"
+        df["Advies"] = df["Advies"].ffill()
 
     # 📊 Bereken rendementen op basis van adviesgroepering
     df["AdviesGroep"] = (df["Advies"] != df["Advies"].shift()).cumsum()
@@ -438,22 +556,23 @@ def determine_advice(df, threshold):
         rendementen.extend([markt_rendement] * len(groep))
         sam_rendementen.extend([sam_rendement] * len(groep))
 
-    # ✅ Controle
     if len(rendementen) != len(df):
         raise ValueError(f"Lengte mismatch: rendementen={len(rendementen)}, df={len(df)}")
 
     df["Markt-%"] = rendementen
     df["SAM-%"] = sam_rendementen
 
-    # 🏁 Huidig advies bepalen
     if "Advies" in df.columns and df["Advies"].notna().any():
         huidig_advies = df["Advies"].dropna().iloc[-1]
     else:
         huidig_advies = "Niet beschikbaar"
 
     return df, huidig_advies
+    
+#--- Advies en rendement EINDE
 
-   
+
+  
 # --- Streamlit UI ---
 #st.title("SAM Trading Indicator")
 # Titel met kleur en grootte tonen
@@ -505,46 +624,8 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Simple Alert Monitor 
-#st.markdown("""
-#<div style='display: flex; justify-content: space-between; align-items: top;'>
-#  <div style='flex: 1;'>
-#    <h5 style='margin: 0;'>Simple Alert Monitor</h5>
-#  </div>
-#  <div style='flex: 1; text-align: right;'>
-  #  <details>
-  #    <summary style='cursor: pointer; font-weight: bold; color: #555;text-align: right;'>ℹ️ Uitleg SAM Trading Indicator</summary>
-   #   <div style='margin-top: 10px; padding: 10px; background-color: #f9f9f9; border-radius: 8px;'>
-   #     <p style='font-size: 13px; color: #333; text-align: left'>
-     #   Gebruik de <strong>SAM Trading Indicator</strong> door voornamelijk te sturen op de blauwe lijn in de SAM en Trend grafiek,
-   #     de trendlijn. De groene en rode SAM waarden (vaak perioden) geven het momentum weer...
-  #      <br><br>
-   #     Het advies is hiervan afgeleid en kan bijgesteld worden door de gevoeligheid aan te passen.<br>
-   #     De indicator is oorspronkelijk bedoeld voor de <strong>middellange termijn belegger</strong>.
- #       </p>
-#      </div>
-  #  </details>
-#  </div>
-#</div>
-#""", unsafe_allow_html=True)
 
-#st.markdown(
-#    f"""
-#    <h1>SAM Trading Indicator<span style='color:#3366cc'>   </span></h1>
-#    """,
-#    unsafe_allow_html=True
-##)
-# Simple Alert Monitor 
-#col1, col2 = st.columns([9, 6])  # Pas verhouding aan als je wilt
 
-#with col1:
-#    st.markdown(
-  #      f"""
-  #      <h5>Simple Alert Monitor</h5>
-   #     """,
- #       unsafe_allow_html=True 
-#    )    
-#with col2:
 #    with st.expander("ℹ️ Uitleg SAM Trading Indicator"):
   #      st.markdown(
   #          """
@@ -740,7 +821,7 @@ st.markdown("""
   </div>
   <div style='flex: 1; text-align: right;'>
     <details>
-      <summary style='cursor: pointer; font-weight: bold; color: #555;text-align: right;'>ℹ️ Uitleg SAM Trading Indicator</summary>
+      <summary style='cursor: pointer; font-weight: bold; color: #555;text-align: right;'>ℹ️ Uitleg Adviesgevoeligheid</summary>
       <div style='margin-top: 10px;'>
         <p style='font-size: 13px; color: #333; text-align: left'>
         De gevoeligheidsslider bepaalt hoeveel opeenvolgende perioden met dezelfde trendrichting
@@ -754,28 +835,6 @@ st.markdown("""
   </div>
 </div>
 """, unsafe_allow_html=True)
-# 📌 Titel en uitleg als toggle (zelfde stijl als eerder) werkt niet
-#st.markdown("""
-#<div style='display: flex; justify-content: space-between; align-items: flex-start; max-width: 900px; margin-bottom: 10px;'>
-#  <div style='flex: 1; padding-right: 20px;'>
- #   <h4 style='margin-bottom: 10px;'>⚙️ Adviesgevoeligheid</h4>
-#  </div>
-#  <div style='flex: 1;'>
-#    <details>
-#      <summary style='cursor: pointer; font-weight: bold; color: #555;'>ℹ️ Uitleg Adviesgevoeligheid</summary>
-#      <div style='margin-top: 10px; padding: 10px; background-color: #f9f9f9; border-radius: 8px;'>
- #       <p style='font-size: 13px; color: #333; text-align: left;'>
- #       De gevoeligheidsslider bepaalt hoeveel opeenvolgende perioden met dezelfde trendrichting
-  #      nodig zijn voordat een advies wordt afgegeven.<br><br>
- #       - Een lagere waarde (**1 of 2**) geeft sneller advieswijzigingen, maar is gevoeliger voor ruis.<br>
- #       - Een hogere waarde (**3 t/m 5**) geeft minder maar betrouwbaardere signalen.<br><br>
-  #      De standaardwaarde is <strong>2</strong>.
- #       </p>
- #     </div>
-#    </details>
-#  </div>
-#</div>
-#""", unsafe_allow_html=True)
 
 # 📌 Slider in kolommen, links met max 50% breedte
 col1, col2 = st.columns([1, 1])
@@ -784,61 +843,46 @@ with col1:
 with col2:
     pass  # lege kolom, zodat slider links blijft
 
-# oude
-#col1, col2 = st.columns([9, 6])  # Pas verhouding aan als je wilt
-
-
-#with col1:
- #   st.markdown("### ⚙️ Adviesgevoeligheid")
-#    thresh = st.slider("Aantal perioden met dezelfde richting voor advies", 1, 5, 2, step=1)
-    
-#with col2:
-#    with st.expander("ℹ️ Uitleg Adviesgevoeligheid"):
-  #      st.markdown(
-   #         """
-#            <div style='color:#444; font-size:12px;'>
- #           De gevoeligheidsslider bepaalt hoeveel opeenvolgende perioden met dezelfde trendrichting
- #           nodig zijn voordat een advies wordt afgegeven.<br>
-  #          Een lagere waarde (1 of 2) geeft sneller advies wijzigingen, maar is gevoeliger voor ruis.
- #           Een hogere waarde (3 of 4) geeft dus minder maar vaak betrouwbaardere adviezen.<br>
-   #         De standaardwaarde is 2.
-   #         </div>
-  #          """,
- #           unsafe_allow_html=True
-  #      )
-
-  #
-
-#thresh = st.slider("Aantal perioden met dezelfde richting voor advies", 1, 5, 2, step=1)
-#thresh = st.slider("Gevoeligheid van trendverandering", 0.01, 0.5, 0.1, step=0.02)
 
 # Berekening
 # ✅ Gecombineerde functie met cache
-@st.cache_data(ttl=900)  # Cache 15 minuten
-def advies_wordt_geladen(ticker, interval, threshold):
+# ✅ Keuzeoptie in de app
+risk_aversion = st.toggle("Voorzichtig advies (risk aversion)", value=False)
+
+# ✅ Gecombineerde functie met cache + risk_aversion
+@st.cache_data(ttl=900)
+def advies_wordt_geladen(ticker, interval, threshold, risk_aversion):
     df = fetch_data(ticker, interval)
+
+#    if df is not None and not df.empty:
+#        st.write("🔎 Laatste regels van originele data:")
+#        st.write(df.tail(10))
+#    else:
+#        st.error("❌ Geen data opgehaald voor deze ticker/interval")
+    
     if df.empty or "Close" not in df.columns or "Open" not in df.columns:
-        return None, None  # Signaal dat data niet bruikbaar is
+        return None, None
+
+    # ✅ Altijd SAM en SAT berekenen
     df = calculate_sam(df)
-    df, huidig_advies = determine_advice(df, threshold=threshold)
+    df = calculate_sat(df)
+
+    # ✅ Advies bepalen op basis van risk_aversion
+    df, huidig_advies = determine_advice(df, threshold=threshold, risk_aversion=risk_aversion)
+
     return df, huidig_advies
-
+    
+    
 # ✅ Gebruik en foutafhandeling
-df, huidig_advies = advies_wordt_geladen(ticker, interval, thresh)
-#df, huidig_advies = get_sam_met_advies(ticker, interval, thresh)
+df, huidig_advies = advies_wordt_geladen(ticker, interval, thresh, risk_aversion)
 
-if df is None or df.empty:
-    st.error("❌ Geen geldige data opgehaald. Kies een andere ticker of interval.")
-    st.stop()
-
-#df = fetch_data(ticker, interval)
-
-#if df.empty:
-#    st.error("❌ Geen geldige data opgehaald. Kies een andere ticker of interval.")
-#    st.stop()
-#df = calculate_sam(df)
-#df = determine_advice(df, threshold=thresh)
-#df, huidig_advies = determine_advice(df, threshold=thresh)
+# Keuze welke adviezen worden meegenomen in SAM-rendement
+signaalkeuze = st.radio(
+    "Toon SAM-rendement voor:",
+    options=["Beide", "Koop", "Verkoop"],
+    index=0,
+    horizontal=True
+)
 
 # debugging tools
 #st.subheader("🔍 SAM Debug-tabel (laatste 8 rijen)")
@@ -934,8 +978,7 @@ with col2:
 
 #    st.plotly_chart(fig, use_container_width=True)
 
-# simpele koersgrafiek
-# ⏳ Toggle voor koersgrafiekb>📈 "📉  Voorbeeld:</b>
+# ⏳ Toggle voor koersgrafiek
 toon_koersgrafiek = st.toggle("📈 Toon koersgrafiek", value=False)
 
 if toon_koersgrafiek:
@@ -944,37 +987,51 @@ if toon_koersgrafiek:
     cutoff_datum = df.index.max() - grafiek_periode
     df_koers = df[df.index >= cutoff_datum].copy()  # Alleen koers in periode
 
-    # ✅ Bereken MA's op de volledige dataset
-    df["MA30"] = df["Close"].rolling(window=30).mean()
-    df["MA150"] = df["Close"].rolling(window=150).mean()
+    # ✅ Bereken MA's op volledige dataset (eenmalig)
+    if "MA30" not in df.columns or "MA150" not in df.columns:
+        df["MA30"] = df["Close"].rolling(window=30).mean()
+        df["MA150"] = df["Close"].rolling(window=150).mean()
 
     # 📊 Plot met lijnen
     fig, ax = plt.subplots(figsize=(10, 4))
 
-    # Plot koers alleen voor gekozen periode
+    # Plot koers (beperkte periode)
     ax.plot(df_koers.index, df_koers["Close"], color="black", linewidth=2.0, label="Koers")
 
-    # Plot MA-lijnen vanuit volledige dataset
+    # Plot MA's over volledige dataset, maar beperk zichtbare x-as
     ax.plot(df.index, df["MA30"], color="orange", linewidth=1.0, label="MA(30)")
     ax.plot(df.index, df["MA150"], color="pink", linewidth=1.0, label="MA(150)")
 
-    # Beperk x-as op koersperiode
+    # Zet x-as beperking op koers-periode (geldt voor alles!)
     ax.set_xlim(df_koers.index.min(), df_koers.index.max())
+    
+    # ➕ y-as: bepaal min/max + marge (veilig en robuust)  
+    try:  
+        close_series = df_koers["Close"]  
+        if isinstance(close_series, pd.DataFrame):  
+            close_series = close_series.iloc[:, 0]  # neem eerste kolom als DataFrame  
+        koers_values = close_series.astype(float).dropna()  
 
-    # ➕ y-as: bepaal min/max + marge (veilig en robuust)
-    try:
-        close_series = df_koers["Close"]
-        if isinstance(close_series, pd.DataFrame):
-            close_series = close_series.iloc[:, 0]  # neem eerste kolom als DataFrame
-        koers_values = close_series.astype(float).dropna()
+        if not koers_values.empty:  
+            koers_min = koers_values.min()  
+            koers_max = koers_values.max()  
+            marge = (koers_max - koers_min) * 0.05  
+            ax.set_ylim(koers_min - marge, koers_max + marge)  
+    except Exception as e:  
+        st.warning(f"Kon y-as limieten niet instellen: {e}")  
 
-        if not koers_values.empty:
-            koers_min = koers_values.min()
-            koers_max = koers_values.max()
-            marge = (koers_max - koers_min) * 0.05
-            ax.set_ylim(koers_min - marge, koers_max + marge)
-    except Exception as e:
-        st.warning(f"Kon y-as limieten niet instellen: {e}")
+    # ➕ y-as: bepaal min/max + marge
+#    try:
+#        koers_values = df_koers["Close"].astype(float).dropna()
+#        if not koers_values.empty:
+#            koers_min = koers_values.min()
+ #           koers_max = koers_values.max()
+  #          marge = (koers_max - koers_min) * 0.05
+   #         ax.set_ylim(koers_min - marge, koers_max + marge)
+ #       else:
+ #           st.warning("Geen geldige koersdata om y-as limieten op te baseren.")
+#    except Exception as e:
+#        st.warning(f"Kon y-as limieten niet instellen: {e}")
 
     # Opmaak
     ax.set_title(f"Koersgrafiek van {ticker_name}")
@@ -983,7 +1040,6 @@ if toon_koersgrafiek:
     ax.legend()
     fig.tight_layout()
     st.subheader("Koersgrafiek")
-
     st.pyplot(fig)
 
 # --- Grafiek met SAM en Trend ---
@@ -1021,49 +1077,81 @@ ax.legend()
 fig.tight_layout()
 st.pyplot(fig)
 
-# --- Grafiek met SAM en Trend  - oud ---
-#fig, ax1 = plt.subplots(figsize=(10, 4))
-#ax1.bar(df_grafiek.index, df_grafiek["SAM"], color="lightblue", label="SAM")
-#ax1.axhline(y=0, color="black", linewidth=1, linestyle="--")  # nullijn
-#ax2 = ax1.twinx()
-#ax2.plot(df_grafiek.index, df_grafiek["Trend"], color="red", label="Trend")
-#ax1.set_ylabel("SAM")
-#ax2.set_ylabel("Trend")
-#fig.tight_layout()
-#st.pyplot(fig)
+# --- Grafiek met SAT Stage en SAT Trend ---
+st.subheader("Grafiek met SAT en Trend")
 
+# Filter data binnen dezelfde periode als bij SAM
+df_sat = df[df.index >= cutoff_datum].copy()
+
+# ✅ Zwarte bars voor SAT_Stage
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.bar(df_sat.index, df_sat["SAT_Stage"], color="black", label="SAT Stage")
+
+# ✅ Blauwe lijn voor SAT_Trend (2px)
+ax.plot(df_sat.index, df_sat["SAT_Trend"], color="blue", linewidth=2, label="SAT Trend")
+
+# ✅ Nullijn
+ax.axhline(y=0, color="gray", linewidth=1, linestyle="--")
+
+# ✅ As-instellingen
+ax.set_xlim(df_sat.index.min(), df_sat.index.max())
+ax.set_ylim(-2.25, 2.25)
+ax.set_ylabel("Waarde")
+ax.set_title("SAT-indicator en Trendlijn")
+
+# ✅ Legenda
+ax.legend()
+
+fig.tight_layout()
+st.pyplot(fig)
+    
 # --- Tabel met signalen en rendement ---
 st.subheader("Laatste signalen en rendement")
 
-# Kolommen selecteren en formatteren
+# ✅ 1. Kolommen selecteren en rijen voorbereiden
 kolommen = ["Close", "Advies", "SAM", "Trend", "Markt-%", "SAM-%"]
-#tabel = df[kolommen].dropna().tail(30).round(3).copy()
 tabel = df[kolommen].dropna().copy()
-tabel = tabel.sort_index(ascending=False).head(30) # lengte tabel hier!
+tabel = tabel.sort_index(ascending=False).head(260)  # Lengte tabel
 
-# Datumkolom aanmaken vanuit index
+# ✅ 2. Datumkolom toevoegen vanuit index
 if not isinstance(tabel.index, pd.DatetimeIndex):
     tabel.index = pd.to_datetime(tabel.index, errors="coerce")
 tabel = tabel[~tabel.index.isna()]
 tabel["Datum"] = tabel.index.strftime("%d-%m-%Y")
 
-# Zet kolomvolgorde
+# ✅ 3. Kolomvolgorde instellen
 tabel = tabel[["Datum"] + kolommen]
 
-# Afronding en formatting
+# ✅ 4. Close kolom afronden afhankelijk van tab
 if selected_tab == "🌐 Crypto":
     tabel["Close"] = tabel["Close"].map("{:.3f}".format)
 else:
     tabel["Close"] = tabel["Close"].map("{:.2f}".format)
-# ✅ Eerst de juiste berekening behouden als float (NIET afronden!)
+
+# ✅ 5. Markt- en SAM-rendement in procenten omzetten
 tabel["Markt-%"] = tabel["Markt-%"].astype(float) * 100
 tabel["SAM-%"] = tabel["SAM-%"].astype(float) * 100
 
-# ✅ Daarna afzonderlijke kolommen voor weergave formatteren
+tabel["Advies"] = tabel["Advies"].astype(str)
+
+# ✅ 6. Filter SAM-% op basis van signaalkeuze
+if signaalkeuze == "Koop":
+    tabel["SAM-%"] = [
+        sam if adv == "Kopen" else 0.0
+        for sam, adv in zip(tabel["SAM-%"], tabel["Advies"])
+    ]
+elif signaalkeuze == "Verkoop":
+    tabel["SAM-%"] = [
+        sam if adv == "Verkopen" else 0.0
+        for sam, adv in zip(tabel["SAM-%"], tabel["Advies"])
+    ]# Bij 'Beide' gebeurt niets
+
+# ✅ 7. Afronden en formatteren van kolommen voor weergave
 tabel["Markt-% weergave"] = tabel["Markt-%"].map("{:+.2f}%".format)
 tabel["SAM-% weergave"] = tabel["SAM-%"].map("{:+.2f}%".format)
 tabel["Trend Weergave"] = tabel["Trend"].map("{:+.3f}".format)
 
+# ✅ 8. Tabel opnieuw samenstellen en hernoemen voor display
 tabel = tabel[["Datum", "Close", "Advies", "SAM", "Trend Weergave", "Markt-% weergave", "SAM-% weergave"]]
 tabel = tabel.rename(columns={
     "Markt-% weergave": "Markt-%",
@@ -1071,7 +1159,7 @@ tabel = tabel.rename(columns={
     "Trend Weergave": "Trend"
 })
 
-# HTML-rendering
+# ✅ 9. HTML-rendering
 html = """
 <style>
     table {
@@ -1115,7 +1203,7 @@ html = """
     <tbody>
 """
 
-# Voeg rijen toe aan de tabel
+# ✅ 10. Rijen toevoegen aan de HTML-tabel
 for _, row in tabel.iterrows():
     html += "<tr>"
     for value in row:
@@ -1124,10 +1212,10 @@ for _, row in tabel.iterrows():
 
 html += "</tbody></table>"
 
-#Weergave in Streamlit
+# ✅ 11. Weergave in Streamlit
 st.markdown(html, unsafe_allow_html=True)
 
-
+#st.write("DEBUG signaalkeuze boven Backtest:", signaalkeuze)
 
 ## 📊 Backtestfunctie: sluit op close van nieuw signaal
 # ✅ 0.Data voorbereiden voor advies')
@@ -1176,7 +1264,7 @@ if len(df_valid) >= 2 and df_valid.iloc[0] != 0.0:
     marktrendement = ((koers_eind - koers_start) / koers_start) * 100
 
 # ✅ Signaalkeuze geforceerd op Beide
-signaalkeuze = "Beide"
+#signaalkeuze = "Beide"
 advies_col = "Advies"
 
 # Vind eerste rij waar 'Trail' >= threshold en dan pas beginnen
@@ -1269,50 +1357,49 @@ def bereken_sam_rendement(df_signalen, signaal_type="Beide", close_col="Close"):
     return sam_rendement, trades, rendementen
 
 # ✅ 4. Berekening
-#sam_rendement, trades, rendementen = bereken_sam_rendement(df, signaalkeuze, close_col)
+# ✅ 4.1: Berekening voor metric (gefilterd op gekozen signaal)
+sam_rendement_filtered, _, _ = bereken_sam_rendement(df_signalen, signaal_type=signaalkeuze, close_col=close_col)
 
-sam_rendement, trades, rendementen = bereken_sam_rendement(df_signalen, signaalkeuze, close_col)
+# ✅ 4.2: Berekening voor volledige analyse (altijd "Beide")
+_, trades_all, _ = bereken_sam_rendement(df_signalen, signaal_type="Beide", close_col=close_col)
 
-# ✅ 5. Visueel weergeven
+# ✅ 5.0: Alleen metric gebaseerd op keuze
 col1, col2 = st.columns(2)
 col1.metric("Marktrendement (Buy & Hold)", f"{marktrendement:+.2f}%" if marktrendement is not None else "n.v.t.")
-col2.metric("📊 SAM-rendement", f"{sam_rendement:+.2f}%" if isinstance(sam_rendement, (int, float)) else "n.v.t.")
+col2.metric("📊 SAM-rendement", f"{sam_rendement_filtered:+.2f}%" if isinstance(sam_rendement_filtered, (int, float)) else "n.v.t.")
 
-if trades:
-    df_trades = pd.DataFrame(trades)
-
+# ✅ 5.1: Volledige analyse op basis van alle trades (Beide)
+if trades_all:
+    df_trades = pd.DataFrame(trades_all)
     df_trades["SAM-% Koop"] = df_trades.apply(lambda row: row["Rendement (%)"] if row["Type"] == "Kopen" else None, axis=1)
     df_trades["SAM-% Verkoop"] = df_trades.apply(lambda row: row["Rendement (%)"] if row["Type"] == "Verkopen" else None, axis=1)
-    df_trades["Markt-%"] = df_trades.apply(
-        lambda row: ((row["Sluit prijs"] - row["Open prijs"]) / row["Open prijs"]) * 100, axis=1)
+    df_trades["Markt-%"] = df_trades.apply(lambda row: ((row["Sluit prijs"] - row["Open prijs"]) / row["Open prijs"]) * 100, axis=1)
 
-    # Kopie voor weergave
+    # ✅ 5.2 Statistieken
+    rendement_totaal = df_trades["Rendement (%)"].sum()
+    rendement_koop = df_trades["SAM-% Koop"].sum(skipna=True)
+    rendement_verkoop = df_trades["SAM-% Verkoop"].sum(skipna=True)
+    aantal_trades = len(df_trades)
+    aantal_koop = df_trades["SAM-% Koop"].notna().sum()
+    aantal_verkoop = df_trades["SAM-% Verkoop"].notna().sum()
+    aantal_succesvol = (df_trades["Rendement (%)"] > 0).sum()
+    aantal_succesvol_koop = (df_trades["SAM-% Koop"] > 0).sum()
+    aantal_succesvol_verkoop = (df_trades["SAM-% Verkoop"] > 0).sum()
+
+    # ✅ 5.3 Captions op basis van volledige set
+    st.caption(f"Aantal afgeronde **trades**: **{aantal_trades}**, totaal resultaat SAM-%: **{rendement_totaal:+.2f}%**, aantal succesvol: **{aantal_succesvol}**")
+    st.caption(f"Aantal **koop** trades: **{aantal_koop}**, SAM-% koop: **{rendement_koop:+.2f}%**, succesvol: **{aantal_succesvol_koop}**")
+    st.caption(f"Aantal **verkoop** trades: **{aantal_verkoop}**, SAM-% verkoop: **{rendement_verkoop:+.2f}%**, succesvol: **{aantal_succesvol_verkoop}**")
+
+    # ✅ 5.4 Tabel tonen
     df_display = df_trades.copy()
-
-   # Formatteringskolommen
-    for col in ["Markt-%", "Rendement (%)", "SAM-% Koop", "SAM-% Verkoop"]:
-        if col in df_display.columns:
-            df_display[col] = df_display[col].astype(float)
-
     df_display = df_display.rename(columns={"Rendement (%)": "SAM-% tot."})
     df_display = df_display[[
         "Open datum", "Open prijs", "Sluit datum", "Sluit prijs",
         "Markt-%", "SAM-% tot.", "SAM-% Koop", "SAM-% Verkoop"]]
 
-    # Succes-analyses
-    aantal_trades = len(df_display)
-    aantal_koop = df_display["SAM-% Koop"].notna().sum()
-    aantal_verkoop = df_display["SAM-% Verkoop"].notna().sum()
-    rendement_totaal = df_display["SAM-% tot."].sum()
-    rendement_koop = df_display["SAM-% Koop"].sum(skipna=True)
-    rendement_verkoop = df_display["SAM-% Verkoop"].sum(skipna=True)
-    aantal_succesvol = (df_display["SAM-% tot."] > 0).sum()
-    aantal_succesvol_koop = (df_display["SAM-% Koop"] > 0).sum()
-    aantal_succesvol_verkoop = (df_display["SAM-% Verkoop"] > 0).sum()
-
-    st.caption(f"Aantal afgeronde **trades**: **{aantal_trades}**, totaal resultaat SAM-%: **{rendement_totaal:+.2f}%**, aantal succesvol: **{aantal_succesvol}**")
-    st.caption(f"Aantal **koop** trades: **{aantal_koop}**, SAM-% koop: **{rendement_koop:+.2f}%**, succesvol: **{aantal_succesvol_koop}**")
-    st.caption(f"Aantal **verkoop** trades: **{aantal_verkoop}**, SAM-% verkoop: **{rendement_verkoop:+.2f}%**, succesvol: **{aantal_succesvol_verkoop}**")
+    for col in ["Markt-%", "SAM-% tot.", "SAM-% Koop", "SAM-% Verkoop"]:
+        df_display[col] = df_display[col].astype(float)
 
     def kleur_positief_negatief(val):
         if pd.isna(val): return "color: #808080"
@@ -1320,22 +1407,18 @@ if trades:
         if val < 0: return "color: #FF0000"
         return "color: #808080"
 
-    kleurbare_kolommen = ["Markt-%", "SAM-% tot.", "SAM-% Koop", "SAM-% Verkoop"]
     toon_alle = st.toggle("Toon alle trades", value=False)
-    df_display = df_display if toon_alle or len(df_display) <= 12 else df_display.iloc[-12:]
+    if not toon_alle and len(df_display) > 12:
+        df_display = df_display.iloc[-12:]
 
-    # Afronding van 'Open prijs' en 'Sluit prijs' op basis van type asset
     if selected_tab == "🌐 Crypto":
         df_display["Open prijs"] = df_display["Open prijs"].map("{:.3f}".format)
         df_display["Sluit prijs"] = df_display["Sluit prijs"].map("{:.3f}".format)
     else:
         df_display["Open prijs"] = df_display["Open prijs"].map("{:.2f}".format)
         df_display["Sluit prijs"] = df_display["Sluit prijs"].map("{:.2f}".format)
-    
-    # ✅ Laatste stap: toon als tabel
-    geldige_kolommen = [col for col in kleurbare_kolommen if df_display[col].notna().any()]
-    
-    # ✅ Eerst kleuren toepassen, dan formatteren (anders krijg je een TypeError)
+
+    geldige_kolommen = [col for col in ["Markt-%", "SAM-% tot.", "SAM-% Koop", "SAM-% Verkoop"] if df_display[col].notna().any()]
     styler = df_display.style.applymap(kleur_positief_negatief, subset=geldige_kolommen)
     styler = styler.format({col: "{:+.2f}%" for col in geldige_kolommen})
 
@@ -1344,60 +1427,32 @@ if trades:
 else:
     st.info("ℹ️ Geen trades gevonden binnen de geselecteerde periode.")
     
-    
 
 
 
 
 
 
-
-
-
-
-
-
-
-# wit
-#with st.container():
-#    st.markdown(
-#        """
-#        <div style='
- #           background-color: #f0f2f6;
- #           border-radius: 12px;
-   #         padding: 20px 25px;
-  #          margin-top: 25px;
-  #          margin-bottom: 25px;
-  #          box-shadow: 0 4px 8px rgba(0,0,0,0.05);
- #       '>
-  #          <h3 style='margin-bottom:10px; color:#2c3e50;'>⚙️ Instellingen voor Adviesgevoeligheid</h3>
-  #          <p style='margin-top:0; color:#6c757d;'>Kies hoe sterk de trend moet zijn voordat een advies volgt. Hogere waarde betekent meer bevestiging vereist.</p>
-  #      </div>
-  #      """,
-   #     unsafe_allow_html=True
- #   )
-
-
-
-
-
-
-
-
-
-    
-
-
-
-# wit
-#  if entry_type is None and advies in ["Kopen", "Verkopen"]:
 #            if mapped_type == "Beide" or advies == mapped_type:
 #                entry_type = advies
  #               entry_price = close
  #               entry_date = datum
  #               continue
 #  else:  
+#-- Grafiek met SAM en Trend  - oud ---
+#fig, ax1 = plt.subplots(figsize=(10, 4))
+#ax1.bar(df_grafiek.index, df_grafiek["SAM"], color="lightblue", label="SAM")
+#ax1.axhline(y=0, color="black", linewidth=1, linestyle="--")  # nullijn
+#ax2 = ax1.twinx()
+#ax2.plot(df_grafiek.index, df_grafiek["Trend"], color="red", label="Trend")
+#ax1.set_ylabel("SAM")
+#ax2.set_ylabel("Trend")
+#fig.tight_layout()
+#st.pyplot(fig)
 
+    # 3) Debug-check: 
+#    st.write("▶️ types:", type(high_series), type(low_series), type(close_series))
+ #   st.write("▶️ head close_series:", close_series.head())
 
 
 
